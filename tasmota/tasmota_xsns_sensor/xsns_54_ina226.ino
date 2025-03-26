@@ -78,7 +78,9 @@
 
 #define INA226_REG_CONFIG                       (0x00)    // Config register
 #define INA226_RES_CONFIG                       (0x4127)  // Config register at reset
-#define INA226_DEF_CONFIG                       (0x42FF)  // Our default configuration
+#ifndef INA226_DEF_CONFIG
+#define INA226_DEF_CONFIG                       (0x47FF)  // = 0100 011 (64 - averages) 111 (8.244 ms - vbusct) 111 (8.244 ms - vshct) 111 (continuous - mode)
+#endif
 #define INA226_CONFIG_RESET                     (0x8000)  // Config register reset bit
 
 #define INA226_REG_SHUNTVOLTAGE                 (0x01)
@@ -460,7 +462,7 @@ bool Ina226CommandSensor()
     // Full scale vbus is volatile (saved in RAM)
     dtostrfd((Ina226Info[device].vbus_lsb*32768.0), 2, fs_vbus_str);
     // Send json response
-    Response_P(PSTR("{\"Sensor54-device-settings-%d\":{\"SHUNT_R\":%s,\"FS_I\":%s\"FS_V\":%s}}"),
+    Response_P(PSTR("{\"Sensor54-device-settings-%d\":{\"SHUNT_R\":%s,\"FS_I\":%s,\"FS_V\":%s}}"),
       device + 1, shunt_r_str, fs_i_str, fs_vbus_str);
   }
 
