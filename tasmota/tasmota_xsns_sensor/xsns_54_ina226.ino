@@ -64,7 +64,10 @@
 * Sensor54 <n>3 Set INA226 channel <n> full scale voltage, floating point. e.g. Sensor54 13 81.92. Useful for systems where voltage exceeds max of 36v, using a voltage divider.
 *
 * By defining INA226_CALC_AH_WH the driver adds a estimation of energies in Ah and Wh to the output.
-* Sensor54 <n>4 Reset INA226 calculated Ah and Wh.
+* Sensor54 <n>4                      Reset INA226 calculated Ah and Wh.
+* By defining INA226_CALC_OPT the driver adds the ability to define more frequent sampling speed.
+* Sensor54 <n>4 0/1/2/3              Reset INA226 calculated Ah/Wh and set sampling speed to 1 sec (default)/250/100/50 ms.
+*                                    This allows a more accurate Ah and Wh reading where the voltage or current might change more often.
 */
 
 // Define driver ID
@@ -83,6 +86,9 @@
 #ifndef INA226_DEF_CONFIG
 #define INA226_DEF_CONFIG                       (0x47FF)  // = 0100 011 (64 - averages) 111 (8.244 ms - vbusct) 111 (8.244 ms - vshct) 111 (continuous - mode)
 #endif
+#define INA226_MED_CONFIG                       (0x45FF)  // = 0100 010 (16 - averages) 111 (8.244 ms - vbusct) 111 (8.244 ms - vshct) 111 (continuous - mode)
+#define INA226_FAST_CONFIG                      (0x4587)  // = 0100 010 (16 - averages) 110 (4.156 ms - vbusct) 110 (4.156 ms - vshct) 111 (continuous - mode)
+#define INA226_EXTRA_CONFIG                     (0x43FF)  // = 0100 001 (4 - averages) 111 (8.244 ms - vbusct) 111 (8.244 ms - vshct) 111 (continuous - mode)
 #define INA226_CONFIG_RESET                     (0x8000)  // Config register reset bit
 
 #define INA226_REG_SHUNTVOLTAGE                 (0x01)
@@ -377,12 +383,19 @@ void Ina226Read(uint8_t device)
 * Poll sensors, and chack for sensor presence
 */
 
+#ifdef INA226_CALC_OPT
+void Ina226EveryCycle(const uint16_t config)
+#else
 void Ina226EverySecond()
+#endif // INA226_CALC_OPT
 {
   //AddLog( LOG_LEVEL_NONE, "Ina226EverySecond");
   for (uint8_t device = 0; device < INA226_MAX_ADDRESSES; device++){
     // If there are Ina226s, and the device was present, and the device still is present, read its registers
     if (Ina226sFound && Ina226Info[device].present && Ina226TestPresence(device)){
+#ifdef INA226_CALC_OPT
+      if (config != Ina226Info[device].config) { continue; }
+#endif // INA226_CALC_OPT
       Ina226Read(device);
     }
     else {
@@ -494,9 +507,31 @@ bool Ina226CommandSensor()
         break;
 
 #ifdef INA226_CALC_AH_WH
-      case 4: // reset calculations
+      case 4: // reset calculations and set cycle reading
         Ina226ResetCalcs(device);
+#ifdef INA226_CALC_OPT
+        switch (atoi(params[1])){
+          case 1:
+            Ina226Info[device].config = INA226_MED_CONFIG;
+            break;
+
+          case 2:
+            Ina226Info[device].config = INA226_FAST_CONFIG;
+            break;
+
+          case 3:
+            Ina226Info[device].config = INA226_EXTRA_CONFIG;
+            break;
+          
+          default:
+            Ina226Info[device].config = INA226_DEF_CONFIG;
+            break;
+        }
+        I2cWrite16( pgm_read_byte(probeAddresses + device), INA226_REG_CONFIG, Ina226Info[device].config);
+        show_config = true;
+#else
         Response_P(PSTR("{\"Sensor54-Command-Result\":{\"Reset_calcs\":%d}}"),device + 1);
+#endif // INA226_CALC_OPT
         break;
 #endif // INA226_CALC_AH_WH
 
@@ -521,8 +556,15 @@ bool Ina226CommandSensor()
     // Full scale vbus is volatile (saved in RAM)
     dtostrfd((Ina226Info[device].vbus_lsb*32768.0), 2, fs_vbus_str);
     // Send json response
-    Response_P(PSTR("{\"Sensor54-device-settings-%d\":{\"SHUNT_R\":%s,\"FS_I\":%s,\"FS_V\":%s}}"),
-      device + 1, shunt_r_str, fs_i_str, fs_vbus_str);
+    Response_P(PSTR("{\"Sensor54-device-settings-%d\":{\"SHUNT_R\":%s,\"FS_I\":%s,\"FS_V\":%s"
+#ifdef INA226_CALC_OPT
+      ",\"CONFIG\":\"0x%04x\""
+#endif // INA226_CALC_OPT
+      "}}"), device + 1, shunt_r_str, fs_i_str, fs_vbus_str
+#ifdef INA226_CALC_OPT
+      , Ina226Info[device].config
+#endif // INA226_CALC_OPT
+      );
   }
 
   return serviced;
@@ -621,8 +663,23 @@ bool Xsns54(uint32_t callback_id)
 
   // Check which callback ID is called by Tasmota
   switch (callback_id) {
+#ifdef INA226_CALC_OPT
+    case FUNC_EVERY_50_MSECOND:
+      Ina226EveryCycle(INA226_EXTRA_CONFIG);
+      break;
+    case FUNC_EVERY_100_MSECOND:
+      Ina226EveryCycle(INA226_FAST_CONFIG);
+      break;
+    case FUNC_EVERY_250_MSECOND:
+      Ina226EveryCycle(INA226_MED_CONFIG);
+      break;
+#endif // INA226_CALC_OPT
     case FUNC_EVERY_SECOND:
+#ifdef INA226_CALC_OPT
+      Ina226EveryCycle(INA226_DEF_CONFIG);
+#else
       Ina226EverySecond();
+#endif // INA226_CALC_OPT
       break;
     case FUNC_JSON_APPEND:
       Ina226Show(1);
