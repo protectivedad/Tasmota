@@ -63,6 +63,8 @@
 * Sensor54 2 Save the configuration and restart
 * Sensor54 <n>3 Set INA226 channel <n> full scale voltage, floating point. e.g. Sensor54 13 81.92. Useful for systems where voltage exceeds max of 36v, using a voltage divider.
 *
+* By defining INA226_CALC_AH_WH the driver adds a estimation of energies in Ah and Wh to the output.
+* Sensor54 <n>4 Reset INA226 calculated Ah and Wh.
 */
 
 // Define driver ID
@@ -120,6 +122,14 @@ static float voltages[4];
 static float currents[4];
 static float powers[4];
 
+// calculation enhancements
+#ifdef INA226_CALC_AH_WH
+#define INA226_ENERGY_FACTOR                   (1.0f/(3600.0f*1000.0f))  // reading values all xx ms
+uint32_t INA226_delta_ms[4];
+uint32_t INA226_last_millis[4];
+static float charges[4];
+static float energies[4];
+#endif // INA226_CALC_AH_WH
 
 /*
 * Log single floating point Number
@@ -194,6 +204,15 @@ void Ina226ResetActive(void)
     }
   }
 }
+
+#ifdef INA226_CALC_AH_WH
+void Ina226ResetCalcs(uint8_t device)
+{
+  INA226_delta_ms[device] = 0;
+  INA226_last_millis[device] = millis();
+  charges[device] = energies[device] = 0.0f;
+}
+#endif // INA226_CALC_AH_WH
 
 /*
 * Initialize INA226 devices
@@ -279,6 +298,10 @@ void Ina226Init()
     I2cSetActiveFound(addr, Ina226Str);
 
     Ina226sFound++;
+
+#ifdef INA226_CALC_AH_WH
+    Ina226ResetCalcs(i);
+#endif // INA226_CALC_AH_WH
   }
 }
 
@@ -335,7 +358,15 @@ void Ina226Read(uint8_t device)
   //AddLog( LOG_LEVEL_NONE, "Ina226Read");
   voltages[device] = Ina226ReadBus_v(device);
   currents[device] = Ina226ReadShunt_i(device);
-  powers[device] = Ina226ReadPower_w(device);
+  powers[device] = voltages[device] * currents[device];
+#ifdef INA226_CALC_AH_WH
+  uint32_t temp_millis = millis();
+  INA226_delta_ms[device] = temp_millis - INA226_last_millis[device];
+  INA226_last_millis[device] = temp_millis;
+  float temp_charge = currents[device] * (float)INA226_delta_ms[device] * INA226_ENERGY_FACTOR;
+  charges[device] += temp_charge;
+  energies[device] += voltages[device] * temp_charge;
+#endif // INA226_CALC_AH_WH
   //AddLog( LOG_LEVEL_NONE, "INA226 Device %d", device );
   //_debug_fval("Voltage", voltages[device]);
   //_debug_fval("Current", currents[device]);
@@ -356,6 +387,9 @@ void Ina226EverySecond()
     }
     else {
         powers[device] = currents[device] = voltages[device] = 0.0f;
+#ifdef INA226_CALC_AH_WH
+        Ina226ResetCalcs(device);
+#endif // INA226_CALC_AH_WH
         // If device was present, note that it dropped off here
         //if(Ina226Info[device].present){
           //reinit_count[device]++;
@@ -459,6 +493,13 @@ bool Ina226CommandSensor()
         show_config = true;
         break;
 
+#ifdef INA226_CALC_AH_WH
+      case 4: // reset calculations
+        Ina226ResetCalcs(device);
+        Response_P(PSTR("{\"Sensor54-Command-Result\":{\"Reset_calcs\":%d}}"),device + 1);
+        break;
+#endif // INA226_CALC_AH_WH
+
       default:
         serviced = false;
         break;
@@ -495,7 +536,12 @@ bool Ina226CommandSensor()
 const char HTTP_SNS_INA226_DATA[] PROGMEM =
   "{s}%s " D_VOLTAGE "{m}%s " D_UNIT_VOLT "{e}"
   "{s}%s " D_CURRENT "{m}%s " D_UNIT_AMPERE "{e}"
-  "{s}%s " D_POWERUSAGE "{m}%s " D_UNIT_WATT "{e}";
+  "{s}%s " D_POWERUSAGE "{m}%s " D_UNIT_WATT "{e}"
+#ifdef INA226_CALC_AH_WH
+  "{s}%s " D_CHARGE "{m}%s " D_UNIT_CHARGE "{e}"
+  "{s}%s " D_ENERGY "{m}%s " D_UNIT_WATTHOUR "{e}"
+#endif // INA226_CALC_AH_WH
+  ;
 #endif  // USE_WEBSERVER
 
 void Ina226Show(bool json)
@@ -514,13 +560,26 @@ void Ina226Show(bool json)
     dtostrfd(currents[i], Settings->flag2.current_resolution, current);
     char power[16];
     dtostrfd(powers[i], Settings->flag2.wattage_resolution, power);
+#ifdef INA226_CALC_AH_WH
+    char charge[16];
+    dtostrfd(charges[i], Settings->flag2.current_resolution, charge);
+    char energy[16];
+    dtostrfd(energies[i], Settings->flag2.wattage_resolution, energy);
+#endif // INA226_CALC_AH_WH
     char name[16];
     snprintf_P(name, sizeof(name), PSTR("INA226%c%d"),IndexSeparator(), i + 1);
 
 
     if (json) {
-      ResponseAppend_P(PSTR(",\"%s\":{\"Id\":%d,\"" D_JSON_VOLTAGE "\":%s,\"" D_JSON_CURRENT "\":%s,\"" D_JSON_POWERUSAGE "\":%s}"),
-                       name, i, voltage, current, power);
+      ResponseAppend_P(PSTR(",\"%s\":{\"Id\":%d,\"" D_JSON_VOLTAGE "\":%s,\"" D_JSON_CURRENT "\":%s,\"" D_JSON_POWERUSAGE "\":%s"
+#ifdef INA226_CALC_AH_WH
+        ",\"" D_JSON_CHARGE "\":%s,\"" D_JSON_ENERGY "\":%s"
+#endif // INA226_CALC_AH_WH
+        "}"), name, i, voltage, current, power
+#ifdef INA226_CALC_AH_WH
+        , charge, energy
+#endif // INA226_CALC_AH_WH
+        );
 #ifdef USE_DOMOTICZ
       if (0 == TasmotaGlobal.tele_period) {
         DomoticzSensor(DZ_VOLTAGE, voltage);
@@ -529,7 +588,11 @@ void Ina226Show(bool json)
 #endif  // USE_DOMOTICZ
 #ifdef USE_WEBSERVER
     } else {
-      WSContentSend_PD(HTTP_SNS_INA226_DATA, name, voltage, name, current, name, power);
+      WSContentSend_PD(HTTP_SNS_INA226_DATA, name, voltage, name, current, name, power
+#ifdef INA226_CALC_AH_WH
+        , name, charge, name, energy
+#endif // INA226_CALC_AH_WH
+        );
 #endif  // USE_WEBSERVER)
     }
 
