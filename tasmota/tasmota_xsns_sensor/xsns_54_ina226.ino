@@ -96,6 +96,7 @@ typedef struct Ina226Info_tag {
   uint16_t config;
   uint8_t present : 1;
   float i_lsb;
+  float p_lsb;
   float vbus_lsb;
 } Ina226Info_t;
 
@@ -259,6 +260,7 @@ void Ina226Init()
     // Full scale current in tenths of an amp
     //AddLog( LOG_LEVEL_NONE, "Full Scale I in tenths of an amp: %u", Settings->ina226_i_fs[i]);
     p->i_lsb = (((float) Settings->ina226_i_fs[i])/10.0f)/32768.0f;
+    p->p_lsb = p->i_lsb * 25.0f;
     //_debug_fval("i_lsb: %s", p->i_lsb, 7);
     p->vbus_lsb = 40.96 / 32768.0; // default 40.96V full scale on 32768 points = 0.00125
 
@@ -310,6 +312,21 @@ float Ina226ReadShunt_i(uint8_t device)
 }
 
 /*
+* Read the calculated power
+*/
+
+float Ina226ReadPower_w(uint8_t device)
+{
+  uint8_t addr = Ina226Info[device].address;
+  int16_t reg_shunt_i = I2cReadS16( addr, INA226_REG_POWER);
+
+  float result = ((float) reg_shunt_i) * (Ina226Info[device].p_lsb);
+
+  return result;
+}
+
+
+/*
 * Read voltage, shunt voltage, current, and power registerd for a given device
 */
 
@@ -318,7 +335,7 @@ void Ina226Read(uint8_t device)
   //AddLog( LOG_LEVEL_NONE, "Ina226Read");
   voltages[device] = Ina226ReadBus_v(device);
   currents[device] = Ina226ReadShunt_i(device);
-  powers[device] = voltages[device] * currents[device];
+  powers[device] = Ina226ReadPower_w(device);
   //AddLog( LOG_LEVEL_NONE, "INA226 Device %d", device );
   //_debug_fval("Voltage", voltages[device]);
   //_debug_fval("Current", currents[device]);
@@ -438,6 +455,7 @@ bool Ina226CommandSensor()
       case 3: // Set full scale VBus
         vbus_fs = CharToFloat(params[1]);
         Ina226Info[device].vbus_lsb = vbus_fs / 32768.0;
+        Ina226Info[device].p_lsb = Ina226Info[device].i_lsb * 25.0f * vbus_fs / 40.96f;
         show_config = true;
         break;
 
