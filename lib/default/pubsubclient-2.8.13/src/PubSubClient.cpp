@@ -268,6 +268,8 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
             while (!_client->available()) {
 
 // Start Tasmota patch
+                void Scheduler(void);
+                Scheduler(); // Allow background reading of sensors/etc when connecting
                 delay(0);  // Prevent watchdog crashes
 // End Tasmota patch
 

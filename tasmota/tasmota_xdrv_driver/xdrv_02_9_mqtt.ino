@@ -1111,6 +1111,8 @@ void MqttConnected(void) {
 }
 
 void MqttReconnect(void) {
+  static uint32_t mqtt_connecting = false;
+  if (mqtt_connecting) { return; } // To allow Scheduler() to run when connecting
   Mqtt.allowed = Settings->flag.mqtt_enabled && (TasmotaGlobal.restart_flag == 0);  // SetOption3 - Enable MQTT, and don't connect if restart in process
   if (Mqtt.allowed) {
 #if defined(USE_MQTT_AZURE_DPS_SCOPEID) && defined(USE_MQTT_AZURE_DPS_PRESHAREDKEY)
@@ -1240,6 +1242,7 @@ void MqttReconnect(void) {
   char stopic[TOPSZ];
   GetTopic_P(stopic, TELE, TasmotaGlobal.mqtt_topic, S_LWT);
   Response_P(S_LWT_OFFLINE);
+  mqtt_connecting = true;
   if (MqttClient.connect(TasmotaGlobal.mqtt_client,
                          mqtt_user,
                          mqtt_pwd,
@@ -1408,6 +1411,7 @@ void MqttReconnect(void) {
 */
     MqttDisconnected(MqttClient.state());
   }
+  mqtt_connecting = false;
 }
 
 void MqttCheck(void) {
