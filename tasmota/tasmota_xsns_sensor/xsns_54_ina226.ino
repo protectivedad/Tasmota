@@ -64,7 +64,7 @@
 * Sensor54 <n>3 Set INA226 channel <n> full scale voltage, floating point. e.g. Sensor54 13 81.92. Useful for systems where voltage exceeds max of 36v, using a voltage divider.
 *
 * By defining INA226_CALC_AH_WH the driver adds a estimation of energies in Ah and Wh to the output.
-* Sensor54 <n>4 Reset INA226 calculated Ah and Wh.
+* Sensor54 <n>4                      Reset INA226 calculated Ah and Wh.
 */
 
 // Define driver ID
@@ -85,15 +85,20 @@
 #ifndef INA226_DEF_CONFIG
 #define INA226_DEF_CONFIG                       (0x4B27)  // Our default configuration
 #endif
+#ifndef INA226_DEF_MILLIS
+#define INA226_DEF_MILLIS                       (563.2f)  // Our default configuration
+#endif
 #define INA226_CONFIG_RESET                     (0x8000)  // Config register reset bit
 
+#define INA226_CVRF_MASK                        (0x0008)
 #define INA226_REG_SHUNTVOLTAGE                 (0x01)
 #define INA226_REG_BUSVOLTAGE                   (0x02)
 #define INA226_REG_POWER                        (0x03)
 #define INA226_REG_CURRENT                      (0x04)
 #define INA226_REG_CALIBRATION                  (0x05)
+#define INA226_REG_MASK_ENABLE                  (0x06)
 
-#define INA226_ENERGY_FACTOR                    (1.0f / (3600.0f * 1000.0f))  // reading values all xx ms
+#define INA226_ENERGY_FACTOR                    (INA226_DEF_MILLIS / (3600.0f * 1000.0f))  // reading values all INA226_DEF_MILLIS ms
 
 typedef struct Ina226Info_tag {
   uint8_t address;
@@ -101,6 +106,7 @@ typedef struct Ina226Info_tag {
   uint16_t config;
   uint8_t present : 1;
   float i_lsb;
+  float p_lsb;
   float vbus_lsb;
 } Ina226Info_t;
 
@@ -126,11 +132,12 @@ static float powers[4];
 
 // calculations
 #ifdef INA226_CALC_AH_WH
-uint32_t INA226_delta_ms[4];
 uint32_t INA226_last_millis[4];
 
 static float charges[4];
 static float energies[4];
+static float deltas[4];
+static uint32_t dirty[4];
 #endif // INA226_CALC_AH_WH
 
 /*
@@ -178,19 +185,10 @@ I2cWrite16( si->address, INA226_REG_CALIBRATION, si->calibrationValue);
 * Test for presence of an Ina226
 */
 
-bool Ina226TestPresence(uint8_t device)
+uint32_t Ina226TestPresence(uint8_t device)
 {
-
-  // Read config
-
-  uint16_t config  = I2cRead16( Ina226Info[device].address, INA226_REG_CONFIG );
-  //AddLog( LOG_LEVEL_NONE, PSTR("Config register %04x" ), config);
-
-  if (config != Ina226Info[device].config)
-    return false;
-
-  return true;
-
+  // Read config to test presence
+  return (I2cRead16( Ina226Info[device].address, INA226_REG_CONFIG ) == Ina226Info[device].config);
 }
 
 void Ina226ResetActive(void)
@@ -210,9 +208,9 @@ void Ina226ResetActive(void)
 #ifdef INA226_CALC_AH_WH
 void Ina226ResetCalcs(uint8_t device)
 {
-  INA226_delta_ms[device] = 0;
   INA226_last_millis[device] = millis();
-  charges[device] = energies[device] = 0.0f;
+  charges[device] = energies[device] = deltas[device] = 0.0f;
+  dirty[device] = 0;
 }
 #endif // INA226_CALC_AH_WH
 
@@ -281,6 +279,7 @@ void Ina226Init()
     // Full scale current in tenths of an amp
     //AddLog( LOG_LEVEL_NONE, "Full Scale I in tenths of an amp: %u", Settings->ina226_i_fs[i]);
     p->i_lsb = (((float) Settings->ina226_i_fs[i])/10.0f)/32768.0f;
+    p->p_lsb = p->i_lsb;
     //_debug_fval("i_lsb: %s", p->i_lsb, 7);
     p->vbus_lsb = 40.96 / 32768.0; // default 40.96V full scale on 32768 points = 0.00125
 
@@ -307,69 +306,45 @@ void Ina226Init()
 }
 
 /*
-* Read the bus voltage, and return it as a float
-*/
-
-float Ina226ReadBus_v(uint8_t device)
-{
-  uint8_t addr = Ina226Info[device].address;
-  int16_t reg_bus_v = I2cReadS16( addr, INA226_REG_BUSVOLTAGE);
-
-  float result = ((float) reg_bus_v) * Ina226Info[device].vbus_lsb;
-
-  return result;
-
-}
-
-/*
-* Read the shunt current, and return it as a float
-*/
-
-float Ina226ReadShunt_i(uint8_t device)
-{
-  uint8_t addr = Ina226Info[device].address;
-  int16_t reg_shunt_i = I2cReadS16( addr, INA226_REG_CURRENT);
-
-  float result = ((float) reg_shunt_i) * Ina226Info[device].i_lsb;
-
-  return result;
-}
-
-/*
-* Read the calculated power
-*/
-
-float Ina226ReadPower_w(uint8_t device)
-{
-  uint8_t addr = Ina226Info[device].address;
-  int16_t reg_shunt_i = I2cReadS16( addr, INA226_REG_POWER);
-
-  float result = ((float) reg_shunt_i) * (Ina226Info[device].i_lsb * 25.0);
-
-  return result;
-}
-
-
-/*
 * Read voltage, shunt voltage, current, and power registerd for a given device
 */
 
 void Ina226Read(uint8_t device)
 {
-  //AddLog( LOG_LEVEL_NONE, "Ina226Read");
-  voltages[device] = Ina226ReadBus_v(device);
-  currents[device] = Ina226ReadShunt_i(device);
-  powers[device] = Ina226ReadPower_w(device);
-#ifdef INA226_CALC_AH_WH
-  uint32_t temp_millis = millis();
-  INA226_delta_ms[device] = temp_millis - INA226_last_millis[device];
-  INA226_last_millis[device] = temp_millis;
-  if (currents[device]) {
-    float temp_charge = currents[device] * (float)INA226_delta_ms[device] * INA226_ENERGY_FACTOR;
-    charges[device] += temp_charge;
-    energies[device] += voltages[device] * temp_charge;
+  static uint32_t notready;
+  static float delta_millis[4];
+  uint8_t addr = Ina226Info[device].address;
+
+  // need at least one notready to ensure oversampling
+  if (!(I2cReadS16( addr, INA226_REG_MASK_ENABLE) & INA226_CVRF_MASK)) {
+    DEBUG_SENSOR_LOG("INA226: Oversampling");
+    ++notready;
+    return;
   }
+  DEBUG_SENSOR_LOG("INA226: Over-sampled %d times", notready);
+  notready = 0;
+  uint32_t temp_millis = millis();
+  delta_millis[device] = (float)(temp_millis - INA226_last_millis[device]);
+  INA226_last_millis[device] = temp_millis;
+  float sample = delta_millis[device] - INA226_DEF_MILLIS;
+  if (INA226_DEF_MILLIS <= sample) {
+    DEBUG_SENSOR_LOG("INA226: Last read %1_f millis ago, sample %1_f" , &delta_millis[device],  &sample);
+    dirty[device] = true;
+  }
+
+  //AddLog( LOG_LEVEL_NONE, "Ina226Read");
+  voltages[device] = ((float) I2cReadS16( addr, INA226_REG_BUSVOLTAGE)) * Ina226Info[device].vbus_lsb;
+  currents[device] = ((float) I2cReadS16( addr, INA226_REG_CURRENT)) * Ina226Info[device].i_lsb;
+  if (currents[device]) { // not sure if we should ignore averaged zero currents
+    powers[device] = ((float) (I2cReadS16( addr, INA226_REG_POWER) * 25)) * (Ina226Info[device].p_lsb);
+#ifdef INA226_CALC_AH_WH
+    charges[device] += currents[device] * INA226_ENERGY_FACTOR;
+    energies[device] += powers[device] * INA226_ENERGY_FACTOR;
+    deltas[device] += (powers[device] - voltages[device] * currents[device]) * INA226_ENERGY_FACTOR;
 #endif // INA226_CALC_AH_WH
+  } else {
+    powers[device] = 0.0f;
+  }
   //AddLog( LOG_LEVEL_NONE, "INA226 Device %d", device );
   //_debug_fval("Voltage", voltages[device]);
   //_debug_fval("Current", currents[device]);
@@ -380,7 +355,7 @@ void Ina226Read(uint8_t device)
 * Poll sensors, and chack for sensor presence
 */
 
-void Ina226EverySecond()
+void Ina226Every250ms()
 {
   //AddLog( LOG_LEVEL_NONE, "Ina226EverySecond");
   for (uint8_t device = 0; device < INA226_MAX_ADDRESSES; device++){
@@ -491,12 +466,13 @@ bool Ina226CommandSensor()
 
       case 3: // Set full scale VBus
         vbus_fs = CharToFloat(params[1]);
-        Ina226Info[device].vbus_lsb = vbus_fs / 32768.0;
+        Ina226Info[device].vbus_lsb = vbus_fs / 32768.0f;
+        Ina226Info[device].p_lsb = Ina226Info[device].i_lsb * vbus_fs / 40.96f;
         show_config = true;
         break;
 
 #ifdef INA226_CALC_AH_WH
-      case 4: // reset calculations
+      case 4: // reset calculations and set cycle reading
         Ina226ResetCalcs(device);
         Response_P(PSTR("{\"Sensor54-Command-Result\":{\"Reset_calcs\":%d}}"),device + 1);
         break;
@@ -523,8 +499,7 @@ bool Ina226CommandSensor()
     // Full scale vbus is volatile (saved in RAM)
     dtostrfd((Ina226Info[device].vbus_lsb*32768.0), 2, fs_vbus_str);
     // Send json response
-    Response_P(PSTR("{\"Sensor54-device-settings-%d\":{\"SHUNT_R\":%s,\"FS_I\":%s,\"FS_V\":%s}}"),
-      device + 1, shunt_r_str, fs_i_str, fs_vbus_str);
+    Response_P(PSTR("{\"Sensor54-device-settings-%d\":{\"SHUNT_R\":%s,\"FS_I\":%s,\"FS_V\":%s}}"), device + 1, shunt_r_str, fs_i_str, fs_vbus_str );
   }
 
   return serviced;
@@ -540,8 +515,9 @@ const char HTTP_SNS_INA226_DATA[] PROGMEM =
   "{s}%s " D_CURRENT "{m}%s " D_UNIT_AMPERE "{e}"
   "{s}%s " D_POWERUSAGE "{m}%s " D_UNIT_WATT "{e}"
 #ifdef INA226_CALC_AH_WH
-  "{s}%s " D_CHARGE "{m}%s " D_UNIT_CHARGE "{e}"
-  "{s}%s " D_ENERGY "{m}%s " D_UNIT_WATTHOUR "{e}"
+  "{s}%s " D_CHARGE "%s{m}%s " D_UNIT_CHARGE "{e}"
+  "{s}%s " D_ENERGY "%s{m}%s " D_UNIT_WATTHOUR "{e}"
+  "{s}%s Delta%s{m}%s " D_UNIT_WATTHOUR "{e}"
 #endif // INA226_CALC_AH_WH
   ;
 #endif  // USE_WEBSERVER
@@ -567,6 +543,8 @@ void Ina226Show(bool json)
     dtostrfd(charges[i], Settings->flag2.current_resolution, charge);
     char energy[16];
     dtostrfd(energies[i], Settings->flag2.wattage_resolution, energy);
+    char delta[16];
+    dtostrfd(deltas[i], Settings->flag2.wattage_resolution, delta);
 #endif // INA226_CALC_AH_WH
     char name[16];
     snprintf_P(name, sizeof(name), PSTR("INA226%c%d"),IndexSeparator(), i + 1);
@@ -592,7 +570,7 @@ void Ina226Show(bool json)
     } else {
       WSContentSend_PD(HTTP_SNS_INA226_DATA, name, voltage, name, current, name, power
 #ifdef INA226_CALC_AH_WH
-        , name, charge, name, energy
+        , name, (dirty[i] ? "(!)" : ""), charge, name, (dirty[i] ? "(!)" : ""), energy, name, (dirty[i] ? "(!)" : ""), delta
 #endif // INA226_CALC_AH_WH
         );
 #endif  // USE_WEBSERVER)
@@ -623,8 +601,8 @@ bool Xsns54(uint32_t callback_id)
 
   // Check which callback ID is called by Tasmota
   switch (callback_id) {
-    case FUNC_EVERY_SECOND:
-      Ina226EverySecond();
+    case FUNC_EVERY_250_MSECOND:
+      Ina226Every250ms();
       break;
     case FUNC_JSON_APPEND:
       Ina226Show(1);
