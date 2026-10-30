@@ -16,7 +16,7 @@
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-
+#define USE_INA226
 #ifdef USE_I2C
 #ifdef USE_INA226
 /*
@@ -336,7 +336,11 @@ void Ina226Read(uint8_t device)
   voltages[device] = ((float) I2cReadS16( addr, INA226_REG_BUSVOLTAGE)) * Ina226Info[device].vbus_lsb;
   currents[device] = ((float) I2cReadS16( addr, INA226_REG_CURRENT)) * Ina226Info[device].i_lsb;
   if (currents[device]) { // not sure if we should ignore averaged zero currents
-    powers[device] = ((float) (I2cReadS16( addr, INA226_REG_POWER) * 25)) * (Ina226Info[device].p_lsb);
+    if (currents[device] < 0) {
+      powers[device] = ((float) (I2cReadS16( addr, INA226_REG_POWER) * 25)) * (-Ina226Info[device].p_lsb);
+    } else {
+      powers[device] = ((float) (I2cReadS16( addr, INA226_REG_POWER) * 25)) * (Ina226Info[device].p_lsb);
+    }
 #ifdef INA226_CALC_AH_WH
     charges[device] += currents[device] * INA226_ENERGY_FACTOR;
     energies[device] += powers[device] * INA226_ENERGY_FACTOR;
